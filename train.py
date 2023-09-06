@@ -1,22 +1,16 @@
-import os
-import shutil
-import tensorflow as tf
 import pandas as pd
-import tabnet
+import tensorflow as tf
+from sklearn.model_selection import KFold
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+import warnings
 
-from sklearn.model_selection import train_test_split
-
-# Constants
-BATCH_SIZE = 500
-num_classes = 2  # Survived or not
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # Load datasets
 train_dataset = pd.read_csv("C:\\Users\\Anthony\\Desktop\\kaggle-titanic-competition\\titanic\\train.csv")
 test_dataset = pd.read_csv("C:\\Users\\Anthony\\Desktop\\kaggle-titanic-competition\\titanic\\test.csv")
 
-# Extract labels
-train_labels = train_dataset['Survived']
-train_dataset.drop(columns=['Survived'], inplace=True) 
+deck_encoder = LabelEncoder()
 
 # Handle missing values
 train_dataset['Filled_Age'] = train_dataset['Age'].fillna(train_dataset['Age'].median())
@@ -26,13 +20,47 @@ test_dataset['Filled_Age'] = test_dataset['Age'].fillna(test_dataset['Age'].medi
 test_dataset['Filled_Fare'] = test_dataset['Fare'].fillna(test_dataset['Fare'].median())
 test_dataset['Filled_Embarked'] = test_dataset['Embarked'].fillna(test_dataset['Embarked'].mode()[0])
 
-# Additional feature engineering for 'Children' and 'Spouses'
-train_dataset['Children'] = 0
-train_dataset.loc[(train_dataset['Sex'] == 'female') & (train_dataset['Parch'] > 0), 'Children'] = train_dataset['Parch']
+# Convert categorical variables to numeric using label encoding
+label_encoders_dict = {}
+for column_name in ['Sex', 'Filled_Embarked']:
+    encoder = LabelEncoder()
+    train_dataset[column_name + '_Encoded'] = encoder.fit_transform(train_dataset[column_name])
+    test_dataset[column_name + '_Encoded'] = encoder.transform(test_dataset[column_name])
+    label_encoders_dict[column_name] = encoder
 
-test_dataset['Children'] = 0
-test_dataset.loc[(test_dataset['Sex'] == 'female') & (test_dataset['Parch'] > 0), 'Children'] = test_dataset['Parch']
+# Feature engineering
 
+# Family Size
+train_dataset['FamilySize'] = train_dataset['SibSp'] + train_dataset['Parch']
+test_dataset['FamilySize'] = test_dataset['SibSp'] + test_dataset['Parch']
+
+# Alone or Not
+train_dataset['IsAlone'] = 0
+train_dataset.loc[train_dataset['FamilySize'] == 0, 'IsAlone'] = 1
+
+test_dataset['IsAlone'] = 0
+test_dataset.loc[test_dataset['FamilySize'] == 0, 'IsAlone'] = 1
+
+# Cabin Information (Deck)
+train_dataset['Deck'] = train_dataset['Cabin'].apply(lambda x: x[0] if pd.notna(x) else 'M')
+test_dataset['Deck'] = test_dataset['Cabin'].apply(lambda x: x[0] if pd.notna(x) else 'M')
+
+train_dataset['Deck_Encoded'] = deck_encoder.fit_transform(train_dataset['Deck'])
+test_dataset['Deck_Encoded'] = deck_encoder.transform(test_dataset['Deck'])
+train_dataset['IsChild'] = 0
+train_dataset.loc[train_dataset['Filled_Age'] < 18, 'IsChild'] = 1
+
+test_dataset['IsChild'] = 0
+test_dataset.loc[test_dataset['Filled_Age'] < 18, 'IsChild'] = 1
+
+# Identifying mothers
+train_dataset['IsMother'] = 0
+train_dataset.loc[(train_dataset['Sex'] == 'female') & (train_dataset['Filled_Age'] > 18) & (train_dataset['Parch'] > 0), 'IsMother'] = 1
+
+test_dataset['IsMother'] = 0
+test_dataset.loc[(test_dataset['Sex'] == 'female') & (test_dataset['Filled_Age'] > 18) & (test_dataset['Parch'] > 0), 'IsMother'] = 1
+
+# Identifying spouses for males (assuming the 'SibSp' column for males refers to spouses)
 train_dataset['Spouses'] = 0
 train_dataset.loc[train_dataset['Sex'] == 'male', 'Spouses'] = train_dataset['SibSp']
 
@@ -40,75 +68,52 @@ test_dataset['Spouses'] = 0
 test_dataset.loc[test_dataset['Sex'] == 'male', 'Spouses'] = test_dataset['SibSp']
 
 # Define the features for the model
-selected_features = ['Pclass', 'Sex', 'Filled_Age', 'Children', 'Spouses', 'Fare', 'Filled_Embarked']
+selected_features = ['Pclass', 'Sex_Encoded', 'Filled_Age', 'IsChild', 'IsMother', 'Spouses', 'Fare', 'Filled_Embarked_Encoded']
 
+# Normalize the features using MinMaxScaler
+scaler = MinMaxScaler()
+train_features = scaler.fit_transform(train_dataset[selected_features])
+test_features = scaler.transform(test_dataset[selected_features])
 
-# Preprocess the Titanic dataset
-def preprocess_data(features, age_median, fare_median, embarked_mode):
-    # Normalize continuous features
-    features['Filled_Age'] = features['Age'].fillna(age_median)
-    features['Filled_Fare'] = features['Fare'].fillna(fare_median)
-    features['Filled_Embarked'] = features['Embarked'].fillna(embarked_mode)
-    
-    # Drop the original columns with NaN values
-    features.drop(columns=['Age', 'Cabin', 'Embarked'], inplace=True)
+train_labels = train_dataset['Survived'].values
 
-    # One-hot encode categorical features
-    features = pd.get_dummies(features, columns=['Sex', 'Filled_Embarked', 'Pclass'])
+# Define and compile the model in a function
+def create_model():
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(256, activation='relu', input_shape=(len(selected_features),)),
+        tf.keras.layers.Dropout(0.5),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dropout(0.5),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dropout(0.5),
+        tf.keras.layers.Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
 
-    return features
+# Implement k-fold cross-validation
+num_folds = 5
+kfold = KFold(n_splits=num_folds, shuffle=True, random_state=42)
 
-# Get median and mode values from the training set
-age_median = train_dataset['Age'].median()
-fare_median = train_dataset['Fare'].median()
-embarked_mode = train_dataset['Embarked'].mode()[0]
+fold_num = 1
+for train_index, val_index in kfold.split(train_features, train_labels):
+    model = create_model()
+    print(f"Training on fold {fold_num}/{num_folds}")
+    model.fit(train_features[train_index], train_labels[train_index], epochs=25, validation_data=(train_features[val_index], train_labels[val_index]), verbose=2)
+    fold_num += 1
 
-# Preprocess the datasets
-train_features = preprocess_data(train_dataset.copy(), age_median, fare_median, embarked_mode)
-test_features = preprocess_data(test_dataset.copy(), age_median, fare_median, embarked_mode)
+# Train on the entire training set
+model = create_model()
+model.fit(train_features, train_labels, epochs=25, verbose=1)
 
-# Identify and drop non-numeric columns
-non_numeric_columns = train_features.select_dtypes(exclude=['number']).columns
-train_features = train_features.drop(columns=non_numeric_columns)
-test_features = test_features.drop(columns=non_numeric_columns)
+# Make predictions on the test dataset
+test_dataset_predictions = (model.predict(test_features) > 0.5).astype("int32")
 
-train_features, val_features, train_labels, val_labels = train_test_split(train_features, train_labels, test_size=0.2, random_state=42)
-
-
-# Convert the labels and features to float32
-train_features = train_features.astype('float32')
-val_features = val_features.astype('float32')
-train_labels = train_labels.astype('float32')
-val_labels = val_labels.astype('float32')
-
-train_labels = train_labels.values.reshape(-1, 1)
-val_labels = val_labels.values.reshape(-1, 1)
-
-
-# Adjust the model configuration
-num_features = train_features.shape[1] 
-
-model = tabnet.TabNetClassifier(feature_columns=None, num_classes=1, num_features=num_features,
-                                feature_dim=32, output_dim=16,
-                                num_decision_steps=5, relaxation_factor=1.5,
-                                sparsity_coefficient=0., batch_momentum=0.98,
-                                virtual_batch_size=None, norm_type='group',
-                                num_groups=-1)
-
-lr = tf.keras.optimizers.schedules.ExponentialDecay(0.001, decay_steps=500, decay_rate=0.9, staircase=False)
-optimizer = tf.keras.optimizers.Adam(lr)
-model.compile(optimizer, loss='binary_crossentropy', metrics=['accuracy'])
-
-model.fit(train_features, train_labels, epochs=15, validation_data=(val_features, val_labels), batch_size=BATCH_SIZE, verbose=2)
-
-predictions = model.predict(test_features)
-
+# Prepare the results for submission
 submission_data = pd.DataFrame({
-    'Not_Survived': (1 - predictions).squeeze(),   # (1 - predictions) gives the probability of Not_Survived
-    'Survived': predictions.squeeze()              # .squeeze() is used to flatten the array into 1D
+    'PassengerId': test_dataset['PassengerId'],
+    'Survived': test_dataset_predictions[:, 0]
 })
 
-# Save predictions to CSV
-predictions = model.predict(test_features)
-submission_data = pd.DataFrame(predictions, columns=['Not_Survived', 'Survived'])
+# Save the predictions to a CSV file
 submission_data.to_csv("C:\\Users\\Anthony\\Desktop\\kaggle-titanic-competition\\titanic\\tensorflow_predictions.csv", index=False)
