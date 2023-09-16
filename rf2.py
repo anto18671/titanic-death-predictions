@@ -1,6 +1,7 @@
 import pandas as pd
 from sklearn.model_selection import GridSearchCV, train_test_split
 import lightgbm as lgb
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -15,12 +16,15 @@ test_data = pd.read_csv('titanic/test.csv')
 
 # Age Prediction
 def predict_age(data):
+    # Bucketizing the fare
+    data['FareBin'] = pd.cut(data['Fare'], bins=[0, 7.91, 14.45, 31, 512], labels=[1, 2, 3, 4], include_lowest=True)
+    
     # Split the data
     age_train_data = data.dropna(subset=['Age'])
     age_predict_data = data[data['Age'].isnull()]
 
     # Prepare features for the model
-    features = ['Pclass', 'SibSp', 'Parch', 'Fare', 'FamilySize', 'Sex', 'Embarked', 'Title']
+    features = ['Pclass', 'SibSp', 'Parch', 'FareBin', 'FamilySize', 'Sex', 'Embarked', 'Title']
 
     X_age = age_train_data[features]
     y_age = age_train_data['Age']
@@ -31,8 +35,8 @@ def predict_age(data):
     # Preprocess features
     preprocessor_age = ColumnTransformer(
         transformers=[
-            ('num', num_transformer, ['SibSp', 'Parch', 'Fare', 'FamilySize']),
-            ('cat', cat_transformer, ['Sex', 'Embarked', 'Title'])
+            ('num', num_transformer, ['SibSp', 'Parch', 'FamilySize']),
+            ('cat', cat_transformer, ['Sex', 'Embarked', 'Title', 'FareBin', 'Pclass'])
         ])
 
     X_age_train_transformed = preprocessor_age.fit_transform(X_age_train)
@@ -40,15 +44,16 @@ def predict_age(data):
     X_age_predict_transformed = preprocessor_age.transform(age_predict_data[features])
 
     # Train the regression model
-    lgb_regressor = lgb.LGBMRegressor(random_state=42, verbose=-1)
-    lgb_regressor.fit(X_age_train_transformed, y_age_train)
+    gb_regressor = GradientBoostingRegressor(random_state=42)
+    gb_regressor.fit(X_age_train_transformed, y_age_train)
 
     # Predict ages for validation set
-    val_predictions = lgb_regressor.predict(X_age_val_transformed)
-    print("Mean Absolute Error for Age Prediction:", mean_absolute_error(y_age_val, val_predictions))
+    val_predictions = gb_regressor.predict(X_age_val_transformed)
+    mae = mean_absolute_error(y_age_val, val_predictions)
+    print("Mean Absolute Error for Age Prediction:", mae)
 
     # Predict ages for the missing values
-    predicted_ages = lgb_regressor.predict(X_age_predict_transformed)
+    predicted_ages = gb_regressor.predict(X_age_predict_transformed)
     return predicted_ages
 
 # Feature Engineering
@@ -107,11 +112,11 @@ param_grid = {
     'max_depth': [10],
     'learning_rate': [0.05],
     'num_leaves': [30],
-    'reg_alpha': [1.0],
-    'reg_lambda': [0.05, 0.1, 0.2],
-    'min_split_gain': [0.2],
-    'min_child_samples': [25],
-    'min_child_weight': [0.001],
+    'reg_alpha': [0.5, 1.0],
+    'reg_lambda': [0.1, 0.5, 1.0],
+    'min_split_gain': [0.0, 0.1, 0.2],
+    'min_child_samples': [18, 20, 22, 25],
+    'min_child_weight': [0.001, 0.01],
     'verbosity': [-1]
 }
 
